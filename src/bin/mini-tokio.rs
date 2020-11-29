@@ -10,6 +10,7 @@ fn main() {
     let mini_tokio = MiniTokio::new();
     mini_tokio.spawn(async {
         spawn(async {
+            // 这里 await，所以 delay 必须返回实现 Future
             delay(Duration::from_millis(100)).await;
             println!("world");
         });
@@ -66,6 +67,7 @@ impl MiniTokio {
         }
     }
 
+    // spawn之后会孵化新的Task并封装其Future，交由 poll
     fn spawn<F>(&self, future: F) where F: Future<Output = ()> + Send + 'static {
         Task::spawn(future, &self.sender);
     }
@@ -74,6 +76,7 @@ impl MiniTokio {
         CURRENT.with(|cell| {
             *cell.borrow_mut() = Some(self.sender.clone());
         });
+        // MiniTokio 从 sender 中获取Task
         while let Ok(task) = self.scheduled.recv() {
             task.poll();
         }
@@ -91,7 +94,7 @@ async fn delay(dur: Duration) {
         when: Instant,
         waker: Option<Arc<Mutex<Waker>>>,
     }
-
+    // 这里实现了 Future
     impl Future for Delay {
         type Output = ();
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
@@ -104,6 +107,10 @@ async fn delay(dur: Duration) {
                 let when = self.when;
                 let waker = Arc::new(Mutex::new(cx.waker().clone()));
                 self.waker = Some(waker.clone());
+                // Future 可以嵌套，说明，比如 Future 里面的代码块会包含别的异步任务
+                // 这就需要将这些任务交由单独的线程阻塞，任务结束后调用wake
+                // Task自身持有 executor 的引用，通过 send 将 Task(已完成，可以poll一次进入下一个状态) 自身发给executor
+                // executor 自身阻塞到recv，收到新的Task后调用Future的poll尝试其进入下一个状态
                 thread::spawn(move || {
                     let now = Instant::now();
                     if now < when {
